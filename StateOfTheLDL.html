@@ -7,11 +7,11 @@
 	
 	<body>
 
-		<h1>State of Layout Descriptor Language</h1>
+		<h1>State of Layout Descriptor Language</h1> 
 
-		<h3>May 2015</h3>
+		<h3>15 July, 2015</h3>
 		
-		<h3>Version 0.2</h3>
+		<h3>Version 0.3</h3>
 		
 		<h3>Tobi Ajila, Angela Lin, Daniel Heidinga, Karl Taylor and Patrick Doyle</h3>
 
@@ -49,7 +49,7 @@
 		<p>
 			A groveller is a tool that parses files for native structures and their members. The output of the groveller is 
 			a <b>layout descriptor</b> (LD) and stub interfaces. The stub interfaces provide an interface for programmers to use during 
-			development. They contain method headers for accessors but no implementation. The LDL is a description of the native 
+			development. They contain method headers for accessors but no implementation. The LD is a description of the native 
 			data that the runtime system uses to generate appropriate accessors. The Layout Factory supplies instances of the stub 
 			interface classes at runtime. These instances contain the implementation of all the accessors.
 		</p>
@@ -102,9 +102,8 @@
 		
 		<p>
 			A <b>member</b> of a layout can be a container, array, union, or nested layout. A container is the most primitive 
-			form of member. The other kinds of members are either a composition of containers or a grouping of containers. 
+			form of member.
 		</p>
-		
 		<p>
 			An <b>array</b> is defined as a contiguous sequence
 			of identical member types. Multi-dimensional arrays are laid out in row-major order.
@@ -117,7 +116,10 @@
 		<p>
 			A <b>layout</b> is defined as a contiguous sequence of members.
 		</p>
-
+		<p>
+			Based on the definitions above a member can be composed of other members. The leaf member of any member hierarchy is always a container.
+			A container is the most basic atomic unit, it cannot be composed of another container.
+		</p>
 		
 		<figure>
 			<img src="pics/Layout.png" alt="Composition of a Layout">
@@ -131,6 +133,7 @@
 			thread cannot observe the value of fields in the container before the update is complete. Since member types in unions 
 			overlap with one another, atomicity and tearing rules are only enforced for the individual member types. 
 		</p>
+
 		
 		<h3>2.3 Endianness</h3>
 		<p>
@@ -144,15 +147,45 @@
 		<h2>3 Data Layout</h2>
 		<ol>
 			<li>
-				A layout descriptor must be interpreted the same way by all JDKs. This means that there can be no implementation-defined inference of 
-				padding or alignment. Every field and member type must be specified in terms of offset
-				and size. The offset is calculated from the beginning of the enclosing type. E.g. the offset of a field is calculated
-				from the beginning of the enclosing container. The offset must take into account any required padding or alignment. 
-				The LD must describe every piece of memory in a layout. There cannot be any unspecified regions.
+				<p>
+					A layout descriptor must be interpreted the same way by all JDKs. This means that there can be no implementation-defined inference of 
+					padding or alignment. Every field and member type must be specified in terms of offset
+					and size. The offset is calculated from the beginning of the enclosing type. E.g. the offset of a field is calculated
+					from the beginning of the enclosing container. The offset must take into account any required padding or alignment. 
+					The LD must describe every piece of memory in a layout. There cannot be any unspecified regions.
+				</p>
 			</li>
 			<li>
-				A layout can have an alignment associated with all allocations of its type. The default alignment for a layout is 
-				the size of its largest member rounded up to 2^n bits.
+				<p>
+					A layout can have an alignment associated with all allocations of its type. The default alignment of a Layout is recursively defined as the following:
+					The Layout alignment is the maximum alignment of all of its members, where the alignment of a member is the maximum alignment of all of its members. If 
+					a member is a container the alignment is its size rounded up to 2^n.
+				</p>
+				<p>
+					Note: The "2^n" requirement is to ensure that default alignment is register sized. However once the size of a container is larger than the largest register 
+					size this limitation is no longer necessary. This is an area that we can expand on in future discussions. 
+				</p>
+				Layout Alignment = Max(Align(member1),... Align(memberN))<br>
+				&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;= Max(Max(Align(member1_1), Max(Align(member1_2))), ... Align(memberN))<br>
+				&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;= Max(Max(ROUND2N(sizeof(container1_1)), Max(ROUND2N(sizeof(container1_2)))), ... Align(memberN))<br>
+				
+				<p style = "background-color: lightgrey">
+					C Example:<br>
+					<br>
+						&emsp;struct Triangle {<br>
+							&emsp;&emsp;uint8_t triDim;<br>
+							&emsp;&emsp;struct {<br>
+								&emsp;&emsp;&emsp;struct {<br>
+									&emsp;&emsp;&emsp;&emsp;uint32_t x;<br>
+									&emsp;&emsp;&emsp;&emsp;uint32_t y;<br>
+									&emsp;&emsp;&emsp;&emsp;uint32_t z;<br>
+								&emsp;&emsp;&emsp;} point[2];<br>
+							&emsp;&emsp;} line[3];<br>
+						&emsp;};<br>
+						
+						The alignment of the structure above is 4bytes. Therefore alignment is not based on direct member size, but on the largest leaf primitive
+						that the structure is composed of. This is analogous to saying that the alignment of a layout is based on the largest leaf container size. 
+				</p>
 			</li>
 			<li>
 				A layout cannot be recursively defined. This means a layout cannot have a nested type of itself or 
@@ -264,10 +297,29 @@
 		<h3>4.2 Effective Address (EA) Accessor</h3>
 		<p>
 			An EA accessor is analogous to C's "address of a struct field". It allows us to pass along a view to a layout member, 
-			for example, in a calling sequence from C->Java->C, without copying or marshalling the member's data.
+			for example, in a calling sequence from C->Java->C, without copying or marshalling the member's data. Other potential uses
+			could be to facilitate casting between layout types.
 		</p>
 		<p>
 			EA accessors do not need to be tied to a particular member type. We could potentially generate them for all members of a layout.
+		</p>
+		<p>
+			The following provides some examples as to how EA should exposed. For this document I will use the term 'address' to describe where a layout is located.
+			<ul>
+				<li>
+					Raw Address - This is a very compact representation but there are major security concerns. There is nothing that ties the raw address to the lifetime
+					of the instance that it represents. Also, it can potentially be modified.
+				</li>
+				<li>
+					
+					Opaque Type with bookkeeping - This provides a type containing an address and a strong reference to the Layout instance. This ensures that the EA can not 
+													survive past the lifetime of the Layout that it represents. In addition, it also enforces that the raw address cannot
+													be seen or modified. However, this adds runtime overhead (accessing address) as well as increases the memory footprint. 
+													That being said, value types (Valhala) could minimize additional footprint costs and also provide the JIT more freedom
+													to register values and improve runtime performance making it the preferred choice.
+					
+				</li>
+			</ul>
 		</p>
 		
 		<h3>4.3 Accessor type rules</h3>
@@ -282,7 +334,7 @@
 				Type information only represents the Java type that is returned, not how the container is loaded or stored.
 			</li>
 			<li>
-				Each named container must have an accessor type associated with it.
+				Each container must have an accessor type associated with it.
 			</li>
 			<li>
 				If a container is of type Pointer or Raw, it cannot have fields.
@@ -291,6 +343,138 @@
 				The type of a nested layout member is itself. In other words, its accessor must return a layout instance of the same type as the nested layout.
 			</li>
 		</ol>
+		
+		<h3>4.4 Accessor generation</h3>
+		<p>
+			It seems sensible to generate accessors in all cases where pointer, primitive and structured types appear in a LD, 
+			for Raw and EA this may not be the case. This section proposes strategies for generating EA and Raw.
+		</p>	
+		<h4>4.4.1 Generate up front</h4>
+		<ol>
+			<li>
+				Generate Always:<br>
+				
+				<p>
+					Generate EA accessors for every layout member and make an exception where Opaque is specified. The downside is that this greatly increases the size of the class (memory footprint) and adds additional API complexity.
+				</p>
+			</li>
+			<li>
+				Generate when specified:<br>
+				
+				<p>
+					Ensure that all accessor types to be generated are specified in the LD, this also includes EA and Raw. This implies that
+					all required accessor types used must be known when the LD is created. The provider of the LD determines which fields get an EA and it cannot be requested after.
+				</p>
+			</li>
+			<li>
+				EA inner class:<br>
+				
+				<p>
+					Create an inner Class in the Layout that contains all the EA getters. This separates all basic getters and setters from the EA getters and thus reduces API complexity.
+				</p>
+			</li>
+			
+			<li>
+				
+					Two Stub Interfaces:
+					<p>
+						Two separate stub interfaces for Layouts, one with basic LD specified getters and another sub-Interface with EA (and/or Raw). However, JVMs prefer monomorphic callsites and single implementations of interfaces. 
+					</p>
+			</li>
+		</ol>
+
+		<h4>4.4.2 Generate on demand</h4>
+		<p> 
+			<ol>
+				<li>
+					EAFactory factory:
+					<p>
+						&emsp;class EAFactory {<br>
+							&emsp;//detects if member is opaque or non-existent<br>
+							&emsp;&emsp;EA getEA(Layout instance, String memberName);<br>
+							
+							&emsp;&emsp;EA getEA(Layout instance);<br>
+							
+							&emsp;&emsp;EA getEA(Array1D instance, long index);<br>
+							
+							&emsp;&emsp;EA getEA(Array2D instance, long row, long column);<br>
+						&emsp;}<br>
+						
+						<br>
+						The disadvantage is this requires reflection to look up offsets of members when given a member name (could make use of caching techniques to make this faster).
+					</p>
+				</li>
+
+				
+			</ol>
+		</p>
+		
+		<h4>4.4.3 Overview</h4>
+		<table border="1px solid black">
+			<tr>
+				<th>Options</th>
+				<th>JIT Optimizations</th>
+				<th>Runtime Cost</th>
+				<th>Footprint</th>
+				<th>API complexity/usability</th>
+			</tr>
+			<tr>
+				<td>Generate Always</td>
+				<td>Good: <br>Jit can easily inline methods, likely monomorphic</td>
+				<td>Good: <br>No runtime cost to generating methods</td>
+				<td>Poor: <br>Increased class size</td>
+				<td>Poor: <br>Additional EA methods may confuse users who are not familiar with low-level languages</td>
+			</tr>
+			<tr>
+				<td>Generate When Specified</td>
+				<td>Good: <br>Jit can easily inline methods, likely monomorphic</td>
+				<td>Good: <br>No runtime cost to generating methods</td>
+				<td>Fair: <br>Increased class size, but only when specified</td>
+				<td>Poor: <br>Cannot request EA methods that are not specified in the LD </td>
+			</tr>
+			<tr>
+				<td>EA inner class</td>
+				<td>Good: <br>Jit can easily inline methods, likely monomorphic</td>
+				<td>Good: <br>No runtime cost to generating methods</td>
+				<td>Poor:<br>Increased class size</td>
+				<td>Good:<br>Separation of EA methods and other basic methods</td>
+			</tr>
+			<tr>
+				<td>Two Interfaces</td>
+				<td>Poor:<br> Not monomorphic</td>
+				<td>Good: <br>No runtime cost to generating methods</td>
+				<td>Poor:<br> Additional class</td>
+				<td>Good:<br>Separation of EA methods and other basic methods</td>
+			</tr>
+			<tr>
+				<td>EA factory</td>
+				<td>Fair:<br>Acquiring EA is not a simple base + offset operation</td>
+				<td>Poor:<br>Requires reflection to find fields</td>
+				<td>Good:<br>No EA methods in Layout Classes</td>
+				<td>Good:<br>Separation of EA methods and other basic methods</td>
+			</tr>
+		</table>
+		
+		<p>
+			EA inner class appears to be the best choice as it does not increases API complexity and is likely to have good performance.
+		</p>
+		<h4>4.4.4 RAW utility</h4>
+		<p>
+			Raw has been previously defined as an accessor type, but it can also be viewed as a utility type. The are cases where it would be useful to access the raw bits of a layout (copying a layout, overwriting a layout, etc.). The following describes a Raw API that can facilitate this:<br>
+			
+			&emsp;class RAWFactory {<br>
+				&emsp;&emsp;Raw getRaw(Layout instance);<br>
+				
+				&emsp;&emsp;Raw getRaw(Layout instance, EA start, EA end);<br>
+				
+				&emsp;&emsp;Raw getRaw(Array1D instance, long index);<br>
+				
+				&emsp;&emsp;Raw getRaw(Array2D instance, long row, long column);<br>
+				
+			&emsp;}<br>
+			
+			This API makes use of EA to generate Raw objects. The use of this API will be restricted by a security layer as improper use of this functionality may cause the JVM to malfunction. 
+		</p>
 		
 		<h2>5 Grammar</h2>
 		<h3>5.1 Goals</h3>
